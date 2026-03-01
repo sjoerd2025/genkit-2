@@ -20,19 +20,24 @@ import {
   modelActionMetadata,
   type ActionMetadata,
   type EmbedderReference,
-  type Genkit,
   type ModelReference,
   type z,
 } from 'genkit';
 import { logger } from 'genkit/logging';
 import { modelRef } from 'genkit/model';
-import { genkitPlugin, type GenkitPlugin } from 'genkit/plugin';
+import {
+  backgroundModel,
+  embedder,
+  genkitPluginV2,
+  model,
+  type GenkitPluginV2,
+  type ResolvableAction,
+} from 'genkit/plugin';
 import type { ActionType } from 'genkit/registry';
 import { getApiKeyFromEnvVar } from './common.js';
 import {
   SUPPORTED_MODELS as EMBEDDER_MODELS,
   GeminiEmbeddingConfigSchema,
-  defineGoogleAIEmbedder,
   geminiEmbedding001,
   textEmbedding004,
   textEmbeddingGecko001,
@@ -41,7 +46,7 @@ import {
 import {
   GeminiConfigSchema,
   SUPPORTED_GEMINI_MODELS,
-  defineGoogleAIModel,
+  createGeminiModel,
   gemini,
   gemini10Pro,
   gemini15Flash,
@@ -61,16 +66,10 @@ import {
 import {
   GENERIC_IMAGEN_INFO,
   ImagenConfigSchema,
-  defineImagenModel,
   type KNOWN_IMAGEN_MODELS,
 } from './imagen.js';
 import { listModels } from './list-models.js';
-import {
-  GENERIC_VEO_INFO,
-  KNOWN_VEO_MODELS,
-  VeoConfigSchema,
-  defineVeoModel,
-} from './veo.js';
+import { GENERIC_VEO_INFO, KNOWN_VEO_MODELS, VeoConfigSchema } from './veo.js';
 export {
   gemini,
   gemini10Pro,
@@ -115,7 +114,33 @@ export interface PluginOptions {
   experimental_debugTraces?: boolean;
 }
 
-async function initializer(ai: Genkit, options?: PluginOptions) {
+// v2 helper functions that return actions directly
+// createGeminiModel is now imported from gemini.ts
+
+function createGeminiEmbedder(
+  name: string,
+  options: { apiKey?: string | false }
+) {
+  // For now, return a placeholder - we'll implement this properly
+  return embedder(
+    {
+      name,
+      configSchema: GeminiEmbeddingConfigSchema,
+      info: {
+        dimensions: 768,
+        label: `Google Gen AI - ${name}`,
+        supports: { input: ['text'] },
+      },
+    },
+    async (request) => {
+      // TODO: Implement actual Gemini embedder
+      throw new Error('Gemini embedder not yet implemented in v2');
+    }
+  );
+}
+
+async function initializer(options?: PluginOptions) {
+  const actions: ResolvableAction[] = [];
   let apiVersions = ['v1'];
 
   if (options?.apiVersion) {
@@ -127,31 +152,32 @@ async function initializer(ai: Genkit, options?: PluginOptions) {
   }
 
   if (apiVersions.includes('v1beta')) {
-    Object.keys(SUPPORTED_GEMINI_MODELS).forEach((name) =>
-      defineGoogleAIModel({
-        ai,
+    Object.keys(SUPPORTED_GEMINI_MODELS).forEach((name) => {
+      const modelAction = createGeminiModel({
         name,
         apiKey: options?.apiKey,
         apiVersion: 'v1beta',
         baseUrl: options?.baseUrl,
-        debugTraces: options?.experimental_debugTraces,
-      })
-    );
+      });
+      actions.push(modelAction);
+    });
   }
   if (apiVersions.includes('v1')) {
-    Object.keys(SUPPORTED_GEMINI_MODELS).forEach((name) =>
-      defineGoogleAIModel({
-        ai,
+    Object.keys(SUPPORTED_GEMINI_MODELS).forEach((name) => {
+      const modelAction = createGeminiModel({
         name,
         apiKey: options?.apiKey,
         apiVersion: undefined,
         baseUrl: options?.baseUrl,
-        debugTraces: options?.experimental_debugTraces,
-      })
-    );
-    Object.keys(EMBEDDER_MODELS).forEach((name) =>
-      defineGoogleAIEmbedder(ai, name, { apiKey: options?.apiKey })
-    );
+      });
+      actions.push(modelAction);
+    });
+    Object.keys(EMBEDDER_MODELS).forEach((name) => {
+      const embedderAction = createGeminiEmbedder(name, {
+        apiKey: options?.apiKey,
+      });
+      actions.push(embedderAction);
+    });
   }
 
   if (options?.models) {
@@ -163,8 +189,7 @@ async function initializer(ai: Genkit, options?: PluginOptions) {
             modelOrRef.name.split('/')[1];
       const modelRef =
         typeof modelOrRef === 'string' ? gemini(modelOrRef) : modelOrRef;
-      defineGoogleAIModel({
-        ai,
+      const modelAction = createGeminiModel({
         name: modelName,
         apiKey: options?.apiKey,
         baseUrl: options?.baseUrl,
@@ -172,61 +197,59 @@ async function initializer(ai: Genkit, options?: PluginOptions) {
           ...modelRef.info,
           label: `Google AI - ${modelName}`,
         },
-        debugTraces: options?.experimental_debugTraces,
       });
+      actions.push(modelAction);
     }
   }
+
+  return actions;
 }
 
 async function resolver(
-  ai: Genkit,
   actionType: ActionType,
   actionName: string,
   options?: PluginOptions
-) {
+): Promise<ResolvableAction | undefined> {
   if (actionType === 'embedder') {
-    resolveEmbedder(ai, actionName, options);
+    return createGeminiEmbedder(actionName, { apiKey: options?.apiKey });
   } else if (actionName.startsWith('veo')) {
     // we do it this way because the request may come in for
     // action type 'model' and action name 'veo-...'. That case should
     // be a noop. It's just the order or model lookup.
     if (actionType === 'background-model') {
-      defineVeoModel(ai, actionName, options?.apiKey);
+      // TODO: Implement Veo background model
+      return backgroundModel({
+        name: actionName,
+        configSchema: VeoConfigSchema,
+        label: `Google AI - ${actionName}`,
+        async start(request) {
+          throw new Error('Veo background model not yet implemented in v2');
+        },
+        async check(operation) {
+          throw new Error('Veo background model not yet implemented in v2');
+        },
+        async cancel(operation) {
+          throw new Error('Veo background model not yet implemented in v2');
+        },
+      });
     }
   } else if (actionType === 'model') {
-    resolveModel(ai, actionName, options);
+    if (actionName.startsWith('imagen')) {
+      // TODO: Implement Imagen model
+      return model({ name: actionName }, async (request) => {
+        throw new Error('Imagen model not yet implemented in v2');
+      });
+    }
+    return createGeminiModel({
+      name: actionName,
+      apiKey: options?.apiKey,
+      baseUrl: options?.baseUrl,
+    });
   }
+  return undefined;
 }
 
-function resolveModel(ai: Genkit, actionName: string, options?: PluginOptions) {
-  if (actionName.startsWith('imagen')) {
-    defineImagenModel(ai, actionName, options?.apiKey);
-    return;
-  }
-
-  const modelRef = gemini(actionName);
-  defineGoogleAIModel({
-    ai,
-    name: modelRef.name,
-    apiKey: options?.apiKey,
-    baseUrl: options?.baseUrl,
-    info: {
-      ...modelRef.info,
-      label: `Google AI - ${actionName}`,
-    },
-    debugTraces: options?.experimental_debugTraces,
-  });
-}
-
-function resolveEmbedder(
-  ai: Genkit,
-  actionName: string,
-  options?: PluginOptions
-) {
-  defineGoogleAIEmbedder(ai, `googleai/${actionName}`, {
-    apiKey: options?.apiKey,
-  });
-}
+// These v1 functions are no longer needed in v2 - they've been replaced by the resolver function above
 
 async function listActions(options?: PluginOptions): Promise<ActionMetadata[]> {
   const apiKey = options?.apiKey || getApiKeyFromEnvVar();
@@ -259,7 +282,7 @@ async function listActions(options?: PluginOptions): Promise<ActionMetadata[]> {
         const name = m.name.split('/').at(-1)!;
 
         return modelActionMetadata({
-          name: `googleai/${name}`,
+          name: name,
           info: { ...GENERIC_IMAGEN_INFO },
           configSchema: ImagenConfigSchema,
         });
@@ -277,7 +300,7 @@ async function listActions(options?: PluginOptions): Promise<ActionMetadata[]> {
         const name = m.name.split('/').at(-1)!;
 
         return modelActionMetadata({
-          name: `googleai/${name}`,
+          name: name,
           info: { ...GENERIC_VEO_INFO },
           configSchema: VeoConfigSchema,
           background: true,
@@ -307,11 +330,9 @@ async function listActions(options?: PluginOptions): Promise<ActionMetadata[]> {
       // Filter out deprecated
       .filter((m) => !m.description || !m.description.includes('deprecated'))
       .map((m) => {
-        const name =
-          'googleai/' +
-          (m.name.startsWith('models/')
-            ? m.name.substring('models/'.length)
-            : m.name);
+        const name = m.name.startsWith('models/')
+          ? m.name.substring('models/'.length)
+          : m.name;
 
         return embedderActionMetadata({
           name,
@@ -332,26 +353,29 @@ async function listActions(options?: PluginOptions): Promise<ActionMetadata[]> {
  * Google Gemini Developer API plugin.
  * @deprecated
  */
-export function googleAIPlugin(options?: PluginOptions): GenkitPlugin {
+export function googleAIPlugin(options?: PluginOptions): GenkitPluginV2 {
   let listActionsCache;
-  return genkitPlugin(
-    'googleai',
-    async (ai: Genkit) => await initializer(ai, options),
-    async (ai: Genkit, actionType: ActionType, actionName: string) =>
-      await resolver(ai, actionType, actionName, options),
-    async () => {
+  return genkitPluginV2({
+    name: 'googleai',
+    async init() {
+      return await initializer(options);
+    },
+    async resolve(actionType: ActionType, actionName: string) {
+      return await resolver(actionType, actionName, options);
+    },
+    async list() {
       if (listActionsCache) return listActionsCache;
       listActionsCache = await listActions(options);
       return listActionsCache;
-    }
-  );
+    },
+  });
 }
 
 /**
  * @deprecated
  */
 export type GoogleAIPlugin = {
-  (params?: PluginOptions): GenkitPlugin;
+  (params?: PluginOptions): GenkitPluginV2;
   model(
     name: keyof typeof SUPPORTED_GEMINI_MODELS | (`gemini-${string}` & {}),
     config?: z.infer<typeof GeminiConfigSchema>
